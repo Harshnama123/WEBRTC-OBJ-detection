@@ -33,19 +33,30 @@ class ObjectDetector {
 
     async loadModel() {
         try {
-            // Initialize ONNX Runtime Web
-            const ort = await import('onnxruntime-web');
-            
-            // Set WASM backend path (assumes onnxruntime-web files are in root of public)
-            ort.env.wasm.wasmPaths = {
-                'ort-wasm.wasm': '/node_modules/onnxruntime-web/dist/ort-wasm.wasm',
-                'ort-wasm-simd.wasm': '/node_modules/onnxruntime-web/dist/ort-wasm-simd.wasm',
-                'ort-wasm-threaded.wasm': '/node_modules/onnxruntime-web/dist/ort-wasm-threaded.wasm'
-            };
+            // Use global ORT from CDN script
+            const ort = window.ort;
 
             // Load the model
-            const modelPath = 'models/mobilenet-ssd.onnx';
-            this.session = await ort.InferenceSession.create(modelPath, {
+            // Use absolute path and cache-busting param so it works from /phone and avoids 304
+            const basePath = '/models/mobilenet-ssd.onnx';
+            const bust = `v=${Date.now()}`;
+            let url = `${basePath}?${bust}`;
+            console.log('Loading ONNX model from', url);
+            let resp = await fetch(url, { cache: 'reload', headers: { 'Cache-Control': 'no-cache' } });
+            if (!resp.ok) {
+                // Fallback without query param
+                url = basePath;
+                console.log('Reload failed with status', resp.status, 'retrying', url);
+                resp = await fetch(url, { cache: 'no-store', headers: { 'Cache-Control': 'no-store' } });
+            }
+            let buffer = await resp.arrayBuffer();
+            if (buffer.byteLength === 0) {
+                console.warn('Model body empty, retrying with no-store');
+                resp = await fetch(basePath, { cache: 'no-store', headers: { 'Cache-Control': 'no-store' } });
+                buffer = await resp.arrayBuffer();
+            }
+            console.log('Model bytes:', buffer.byteLength);
+            this.session = await ort.InferenceSession.create(new Uint8Array(buffer), {
                 executionProviders: ['wasm'],
                 graphOptimizationLevel: 'all'
             });
@@ -53,18 +64,36 @@ class ObjectDetector {
             // Verify input and output names from the loaded model
             const inputNames = this.session.inputNames;
             const outputNames = this.session.outputNames;
-            
-            // Update config if needed based on actual model
+
+            // Update config with actual tensor names
             if (inputNames.length > 0) {
                 this.modelConfig.inputName = inputNames[0];
             }
             if (outputNames.length >= 2) {
-                // Assuming first output is scores and second is boxes
                 this.modelConfig.scoreOutput = outputNames[0];
                 this.modelConfig.boxesOutput = outputNames[1];
+            } else if (outputNames.length === 1) {
+                // Some models output a single detections tensor
+                this.modelConfig.scoreOutput = outputNames[0];
+                this.modelConfig.boxesOutput = outputNames[0];
             }
-            
-            console.log('Model loaded successfully. Input:', inputNames, 'Outputs:', outputNames);
+
+            // Derive input shape from metadata if available
+            const metadata = this.session.inputMetadata?.[this.modelConfig.inputName];
+            if (metadata && Array.isArray(metadata.dimensions)) {
+                const dims = metadata.dimensions.slice();
+                // Replace dynamic dims (<=0) with sensible defaults
+                for (let i = 0; i < dims.length; i++) {
+                    if (typeof dims[i] !== 'number' || dims[i] <= 0) {
+                        dims[i] = i === 0 ? 1 : (i >= 2 ? 300 : 3);
+                    }
+                }
+                if (dims.length === 4) {
+                    this.modelConfig.inputShape = dims;
+                }
+            }
+
+            console.log('Model loaded successfully. Input:', inputNames, 'Outputs:', outputNames, 'Input shape:', this.modelConfig.inputShape);
             return true;
         } catch (error) {
             console.error('Error loading model:', error);
@@ -84,7 +113,7 @@ class ObjectDetector {
             const preprocessedData = this._preprocess(imageData);
             
             // Create input tensor
-            const ort = await import('onnxruntime-web');
+            const ort = window.ort;
             const tensor = new ort.Tensor(
                 'float32',
                 preprocessedData,
@@ -96,7 +125,7 @@ class ObjectDetector {
             feeds[this.modelConfig.inputName] = tensor;
             const results = await this.session.run(feeds);
 
-            // Process results
+            // Process results using robust parser that supports multiple SSD export formats
             const detections = this._postprocess(results);
 
             const endTime = Date.now();
@@ -118,31 +147,41 @@ class ObjectDetector {
         const { inputShape, meanValues, standardScale } = this.modelConfig;
         const [batchSize, channels, height, width] = inputShape;
 
-        // Create a temporary canvas for resizing
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        
-        // Draw and resize image
-        ctx.drawImage(imageData.canvas || createImageBitmap(imageData), 0, 0, width, height);
-        
-        // Get pixel data
-        const imagePixels = ctx.getImageData(0, 0, width, height).data;
-        
-        // Allocate space for the preprocessed data
+        // Create a source canvas with the original ImageData
+        const sourceCanvas = document.createElement('canvas');
+        sourceCanvas.width = imageData.width;
+        sourceCanvas.height = imageData.height;
+        const sourceCtx = sourceCanvas.getContext('2d');
+        sourceCtx.putImageData(imageData, 0, 0);
+
+        // Create a target canvas for resizing to model input size
+        const targetCanvas = document.createElement('canvas');
+        targetCanvas.width = width;
+        targetCanvas.height = height;
+        const targetCtx = targetCanvas.getContext('2d');
+        targetCtx.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, 0, 0, width, height);
+
+        // Read resized pixels
+        const resizedPixels = targetCtx.getImageData(0, 0, width, height).data;
+
+        // Allocate space for CHW float32 tensor
         const preprocessedData = new Float32Array(batchSize * channels * height * width);
-        
-        // Convert pixels to normalized float values and transpose to CHW format
+
+        // Convert RGBA to normalized CHW. Many MobileNet-SSD models expect BGR order.
         for (let y = 0; y < height; y++) {
             for (let x = 0; x < width; x++) {
                 const pixelOffset = (y * width + x) * 4;
-                for (let c = 0; c < channels; c++) {
-                    const preprocessedIndex = c * height * width + y * width + x;
-                    // Normalize pixel value
-                    preprocessedData[preprocessedIndex] = 
-                        (imagePixels[pixelOffset + c] - meanValues[c]) / standardScale;
-                }
+                const r = resizedPixels[pixelOffset];
+                const g = resizedPixels[pixelOffset + 1];
+                const b = resizedPixels[pixelOffset + 2];
+
+                const bIndex = 0 * height * width + y * width + x; // B channel first
+                const gIndex = 1 * height * width + y * width + x;
+                const rIndex = 2 * height * width + y * width + x;
+
+                preprocessedData[bIndex] = (b - meanValues[2]) / standardScale;
+                preprocessedData[gIndex] = (g - meanValues[1]) / standardScale;
+                preprocessedData[rIndex] = (r - meanValues[0]) / standardScale;
             }
         }
 
@@ -150,43 +189,79 @@ class ObjectDetector {
     }
 
     _postprocess(results) {
-        const scores = results[this.modelConfig.scoreOutput];
-        const boxes = results[this.modelConfig.boxesOutput];
+        const outNames = Object.keys(results);
         const detections = [];
 
-        // Get dimensions from scores tensor
-        const [batchSize, numDetections, numClasses] = scores.dims;
-        
-        for (let i = 0; i < numDetections; i++) {
-            // Get the class with highest score
-            let maxScore = -Infinity;
-            let maxClass = -1;
-            
-            for (let j = 1; j < numClasses; j++) { // Skip background class (0)
-                const score = scores.data[i * numClasses + j];
-                if (score > maxScore) {
-                    maxScore = score;
-                    maxClass = j;
+        // Case 1: Separate score and boxes outputs
+        const scores = results[this.modelConfig.scoreOutput];
+        const boxes = results[this.modelConfig.boxesOutput];
+        if (scores && boxes) {
+            const [batchSize, numDetections, numClasses] = scores.dims;
+            for (let i = 0; i < numDetections; i++) {
+                let maxScore = -Infinity;
+                let maxClass = -1;
+                for (let j = 1; j < numClasses; j++) {
+                    const score = scores.data[i * numClasses + j];
+                    if (score > maxScore) {
+                        maxScore = score;
+                        maxClass = j;
+                    }
+                }
+                if (maxScore >= this.modelConfig.scoreThreshold) {
+                    const xmin = boxes.data[i * 4];
+                    const ymin = boxes.data[i * 4 + 1];
+                    const xmax = boxes.data[i * 4 + 2];
+                    const ymax = boxes.data[i * 4 + 3];
+                    detections.push({
+                        label: this.modelConfig.classLabels[maxClass] || String(maxClass),
+                        score: maxScore,
+                        xmin: Math.max(0, Math.min(1, xmin)),
+                        ymin: Math.max(0, Math.min(1, ymin)),
+                        xmax: Math.max(0, Math.min(1, xmax)),
+                        ymax: Math.max(0, Math.min(1, ymax))
+                    });
                 }
             }
-            
-            // Filter by confidence threshold
-            if (maxScore >= this.modelConfig.scoreThreshold) {
-                // Get bounding box coordinates (normalized [0-1])
-                const bbox = {
-                    xmin: boxes.data[i * 4],
-                    ymin: boxes.data[i * 4 + 1],
-                    xmax: boxes.data[i * 4 + 2],
-                    ymax: boxes.data[i * 4 + 3]
-                };
-                
-                // Add detection to results
-                detections.push({
-                    label: this.modelConfig.classLabels[maxClass],
-                    score: maxScore,
-                    ...bbox
-                });
+            return detections;
+        }
+
+        // Case 2: Single detection output tensor (e.g., [1,1,N,7] or [1,N,7] or [N,7])
+        const single = results[outNames[0]];
+        if (single) {
+            const dims = single.dims;
+            const data = single.data;
+            let numFields = 7; // [image_id, label, score, xmin, ymin, xmax, ymax]
+            let numDet = 0;
+            let offset = 0;
+            if (dims.length === 4) {
+                numDet = dims[2];
+            } else if (dims.length === 3) {
+                numDet = dims[1];
+            } else if (dims.length === 2) {
+                numDet = dims[0];
+            } else {
+                numDet = Math.floor(data.length / numFields);
             }
+            for (let i = 0; i < numDet; i++) {
+                const base = i * numFields + offset;
+                const label = data[base + 1];
+                const score = data[base + 2];
+                const xmin = data[base + 3];
+                const ymin = data[base + 4];
+                const xmax = data[base + 5];
+                const ymax = data[base + 6];
+                if (score >= this.modelConfig.scoreThreshold) {
+                    detections.push({
+                        label: this.modelConfig.classLabels[label] || String(label),
+                        score,
+                        xmin: Math.max(0, Math.min(1, xmin)),
+                        ymin: Math.max(0, Math.min(1, ymin)),
+                        xmax: Math.max(0, Math.min(1, xmax)),
+                        ymax: Math.max(0, Math.min(1, ymax))
+                    });
+                }
+            }
+            return detections;
         }
 
         return detections;

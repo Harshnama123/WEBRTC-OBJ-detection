@@ -28,11 +28,16 @@ app.get('/phone', (req, res) => {
 // Socket connection handling
 io.on('connection', (socket) => {
   console.log('Device connected:', socket.id);
+  socket.data = socket.data || {};
   
   socket.on('device-type', (type) => {
     console.log('Device type:', type, socket.id);
+    socket.data.deviceType = type;
     if (type === 'phone') {
+      console.log('Phone connected, notifying all laptops');
       socket.broadcast.emit('phone-connected');
+      // Also notify this phone about any existing laptops
+      socket.emit('laptop-ready');
     }
   });
 
@@ -48,10 +53,22 @@ io.on('connection', (socket) => {
   socket.on('ice-candidate', (candidate) => {
     socket.broadcast.emit('ice-candidate', candidate);
   });
+
+  // Relay custom events between phone and laptop
+  socket.on('detection-results', (results) => {
+    socket.broadcast.emit('detection-results', results);
+  });
+
+  socket.on('request-track', () => {
+    socket.broadcast.emit('request-track');
+  });
+
+  socket.on('track-ready', () => {
+    socket.broadcast.emit('track-ready');
+  });
   
   socket.on('phone-ready', () => {
     console.log('Phone ready:', socket.id);
-    socket.broadcast.emit('phone-connected');
     // Tell phone that laptop is ready to receive the offer
     socket.emit('laptop-ready');
   });
@@ -62,8 +79,10 @@ io.on('connection', (socket) => {
   });
   
   socket.on('disconnect', () => {
-    console.log('Device disconnected:', socket.id);
-    socket.broadcast.emit('phone-disconnected');
+    console.log('Device disconnected:', socket.id, 'type:', socket.data?.deviceType);
+    if (socket.data?.deviceType === 'phone') {
+      socket.broadcast.emit('phone-disconnected');
+    }
   });
 });
 

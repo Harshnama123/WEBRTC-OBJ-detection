@@ -158,15 +158,13 @@
              autoplay
              width="640"
              height="480"
-             style="width: 100%; max-width: 800px; min-height: 300px; 
+             style="width: 100%; max-width: 640px; height: auto; 
                     border: 2px solid #00ff00; background: #000; 
                     display: block; margin: 0 auto; object-fit: contain;
                     transform: translateZ(0); /* Force hardware acceleration */
                     will-change: transform; /* Optimize performance */
                     backface-visibility: hidden;
-                    -webkit-backface-visibility: hidden;
-                    perspective: 1000px;
-                    -webkit-perspective: 1000px;"
+                    -webkit-backface-visibility: hidden;"
              onresize="console.log('Video size changed:', this.videoWidth, 'x', this.videoHeight)"
              onloadeddata="console.log('Video data loaded:', this.videoWidth, 'x', this.videoHeight)">
         Your browser doesn't support video playback.
@@ -193,6 +191,28 @@
             const remoteVideo = document.getElementById('remoteVideo');
             const playOverlay = document.getElementById('playOverlay');
             const streamStatus = document.getElementById('streamStatus');
+            
+            // Get the stream from the event
+            const [remoteStream] = event.streams;
+            if (!remoteStream) {
+                console.error('No stream in track event');
+                return;
+            }
+            
+            console.log('Got remote stream:', remoteStream.id);
+            remoteVideo.srcObject = remoteStream;
+            
+            // Wait for the track to become active
+            await new Promise((resolve) => {
+                const checkTrack = () => {
+                    if (!event.track.muted) {
+                        resolve();
+                    } else {
+                        setTimeout(checkTrack, 100);
+                    }
+                };
+                checkTrack();
+            });
             
             if (event.streams && event.streams[0]) {
                 const stream = event.streams[0];
@@ -252,21 +272,21 @@
                 const settings = videoTrack.getSettings();
                 console.log('📹 Video track settings:', settings);
                 
-                // Force track to provide dimensions if needed
-                if (!settings.width || !settings.height) {
-                    console.warn('⚠️ No dimensions from track, applying constraints...');
-                    await videoTrack.applyConstraints({
-                        width: { min: 640, ideal: 1280 },
-                        height: { min: 480, ideal: 720 }
-                    }).catch(err => {
-                        console.warn('Could not apply constraints:', err);
-                    });
-                }
-                
-                // Configure video element
+                // Instead of trying to constrain the track, we'll set the video element's dimensions
                 remoteVideo.playsInline = true;
                 remoteVideo.autoplay = true;
                 remoteVideo.muted = true;
+                
+                // Set initial dimensions on video element if track doesn't provide them
+                if (!settings.width || !settings.height) {
+                    console.log('📏 Setting default video dimensions');
+                    remoteVideo.width = 640;
+                    remoteVideo.height = 480;
+                } else {
+                    console.log('📏 Using track dimensions:', settings.width, 'x', settings.height);
+                    remoteVideo.width = settings.width;
+                    remoteVideo.height = settings.height;
+                }
                 
                 // Set the stream
                 remoteVideo.srcObject = stream;
@@ -427,6 +447,9 @@
           peerConnection.onicecandidate = null;
           peerConnection.oniceconnectionstatechange = null;
           
+          // Store stream state for potential recovery
+          const hadStream = remoteVideo.srcObject !== null;
+          
           // Close and remove all media streams
           if (remoteVideo.srcObject) {
             remoteVideo.srcObject.getTracks().forEach(track => track.stop());
@@ -435,6 +458,23 @@
           
           // Close the connection
           peerConnection.close();
+          
+          // Show reconnecting UI if we had a stream
+          if (hadStream) {
+            const playOverlay = document.getElementById('playOverlay');
+            const streamStatus = document.getElementById('streamStatus');
+            playOverlay.style.display = 'flex';
+            streamStatus.textContent = 'reconnecting...';
+            streamStatus.style.color = '#ff9800';
+            
+            // Attempt to reconnect after a short delay
+            setTimeout(() => {
+              if (!peerConnection || peerConnection.iceConnectionState === 'closed') {
+                console.log('Attempting to re-establish connection...');
+                socket.emit('laptop-ready');
+              }
+            }, 2000);
+          }
         } catch (e) {
           console.warn('Error during cleanup:', e);
         }
@@ -473,9 +513,22 @@
           const state = peerConnection.iceConnectionState;
           console.log("ICE Connection State:", state);
           
-          if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-            console.log('Connection lost, cleaning up...');
+          if (state === 'disconnected') {
+            console.log('Connection interrupted, waiting for recovery...');
+            // Wait for potential recovery
+            setTimeout(() => {
+              if (peerConnection.iceConnectionState === 'disconnected') {
+                console.log('Connection still interrupted, requesting reconnect...');
+                socket.emit('laptop-ready'); // Request reconnection
+              }
+            }, 5000); // Wait 5 seconds before trying to reconnect
+          } else if (state === 'failed' || state === 'closed') {
+            console.log('Connection failed, cleaning up...');
             cleanupPeerConnection();
+            // Request reconnection
+            socket.emit('laptop-ready');
+          } else if (state === 'connected' || state === 'completed') {
+            console.log('Connection established successfully');
           }
         };
 
@@ -502,12 +555,20 @@
         const remoteVideo = document.getElementById('remoteVideo');
         const streamStatus = document.getElementById('streamStatus');
         const streamDetails = document.getElementById('streamDetails');
+        const playOverlay = document.getElementById('playOverlay');
         
         if (!remoteVideo.srcObject) {
             console.log('❌ No stream assigned to video');
             streamStatus.textContent = 'no stream';
             streamStatus.style.color = '#ff4444';
             streamDetails.textContent = 'Waiting for stream connection...';
+            playOverlay.style.display = 'none'; // Hide play overlay until we have a stream
+            
+            // Request reconnection if no stream
+            if (peerConnection && peerConnection.iceConnectionState === 'connected') {
+                console.log('Connected but no stream, requesting reconnect...');
+                socket.emit('laptop-ready');
+            }
             return false;
         }
 
@@ -576,6 +637,7 @@
         document.querySelector('.video-container').style.display = 'flex';
 
         // Create new peer connection
+        cleanupPeerConnection();
         const pc = createPeerConnection();
         if (!pc) {
           throw new Error("Failed to create peer connection");
@@ -584,6 +646,34 @@
         // Signal readiness to the server
         console.log('Sending laptop-ready signal');
         socket.emit('laptop-ready');
+      } catch (error) {
+        console.error("Error in phone-connected handler:", error);
+        statusEl.textContent = 'Connection failed. Please refresh and try again.';
+        statusEl.className = 'status disconnected';
+        cleanupPeerConnection();
+      }
+      try {
+        // Update UI
+        statusEl.textContent = 'Phone connected! 🎉';
+        statusEl.className = 'status connected';
+        document.querySelector('.qr-section').style.display = 'none';
+        document.querySelector('.header p').style.display = 'none';
+        document.querySelector('.video-container').style.display = 'flex';
+
+        // Create new peer connection
+        if (!peerConnection && !isConnecting) {
+          const pc = createPeerConnection();
+          if (!pc) {
+            throw new Error("Failed to create peer connection");
+          }
+        }
+
+        // Signal readiness to the server
+        console.log('Sending laptop-ready signal');
+        if (!isConnecting && (!peerConnection || peerConnection.iceConnectionState !== 'connected')) {
+          console.log('Sending laptop-ready signal');
+          socket.emit('laptop-ready');
+        }
       } catch (e) {
         console.error("Error in phone-connected handler:", e);
         statusEl.textContent = 'Connection failed. Please refresh and try again.';

@@ -21,6 +21,7 @@
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "onnxruntime-web": "^1.22.0",
+    "selfsigned": "^3.0.1",
     "socket.io": "^4.7.2"
   },
   "devDependencies": {

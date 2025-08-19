@@ -104,6 +104,7 @@
 
     <canvas id="captureCanvas" width="320" height="240" style="display:none;"></canvas>
     <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
     <script src="wasm-inference.js"></script>
     <script>
         const socket = io();
@@ -187,6 +188,24 @@
             
             // Tell server this is a phone
             socket.emit('device-type', 'phone');
+            console.log('Sent phone device type');
+        });
+
+        // Add specific handlers for laptop connection
+        socket.on('laptop-ready', () => {
+            console.log('Laptop is ready for connection');
+            if (localStream) {
+                console.log('We have local stream, creating peer connection');
+                const pc = createPeerConnection();
+                if (pc) {
+                    localStream.getTracks().forEach(track => {
+                        console.log('Adding track to peer connection:', track.kind);
+                        pc.addTrack(track, localStream);
+                    });
+                }
+            } else {
+                console.log('No local stream available yet');
+            }
         });
 
         function cleanupPeerConnection() {
@@ -221,10 +240,26 @@
 
                 peerConnection.oniceconnectionstatechange = () => {
                     console.log("ICE Connection State:", peerConnection.iceConnectionState);
-                    if (peerConnection.iceConnectionState === 'disconnected' || 
-                        peerConnection.iceConnectionState === 'failed' ||
-                        peerConnection.iceConnectionState === 'closed') {
+                    const state = peerConnection.iceConnectionState;
+                    
+                    if (state === 'disconnected') {
+                        console.log('Connection interrupted, attempting recovery...');
+                        // Keep connection alive for potential recovery
+                        setTimeout(() => {
+                            if (peerConnection && peerConnection.iceConnectionState === 'disconnected') {
+                                console.log('Connection still interrupted, attempting reconnect...');
+                                socket.emit('phone-ready');
+                            }
+                        }, 5000);
+                    } else if (state === 'failed' || state === 'closed') {
+                        console.log('Connection failed, cleaning up and attempting reconnect...');
                         cleanupPeerConnection();
+                        socket.emit('phone-ready');
+                    } else if (state === 'connected' || state === 'completed') {
+                        console.log('Connection established successfully');
+                        // Update status to show connected
+                        statusEl.textContent = 'Connected to laptop! 📹';
+                        statusEl.className = 'status streaming';
                     }
                 };
 
@@ -250,9 +285,21 @@
                     throw new Error('Your browser does not support camera access. Please use a modern browser like Chrome or Firefox.');
                 }
                 
-                // First, get permission without constraints
-                console.log('📱 Requesting initial camera permission...');
-                await navigator.mediaDevices.getUserMedia({ video: true });
+                // For mobile browsers, try to get permissions first
+                try {
+                    // Request permissions explicitly
+                    await navigator.mediaDevices.getUserMedia({ 
+                        video: { 
+                            facingMode: 'environment',
+                            width: { ideal: 320 },
+                            height: { ideal: 240 }
+                        } 
+                    });
+                    console.log('Initial camera permission granted');
+                } catch (err) {
+                    console.warn('Initial permission request failed:', err);
+                    // Continue anyway as the main request might still work
+                }
                 
                 // Now enumerate devices after permission
                 console.log('📱 Checking available cameras...');
@@ -264,16 +311,14 @@
                     throw new Error('No cameras found on device!');
                 }
 
-                // Set mandatory constraints for proper resolution
+                // More flexible constraints for mobile devices
                 const constraints = {
                     audio: false,
                     video: {
-                        width: { min: 640, ideal: 1280, max: 1920 },
-                        height: { min: 480, ideal: 720, max: 1080 },
-                        frameRate: { min: 15, ideal: 30 },
-                        facingMode: { ideal: 'environment' },
-                        aspectRatio: { ideal: 1.777777778 },
-                        resizeMode: 'crop-and-scale'
+                        width: { ideal: 640, min: 320 },
+                        height: { ideal: 480, min: 240 },
+                        frameRate: { ideal: 30, min: 15 },
+                        facingMode: { ideal: 'environment' }
                     }
                 };
                 
@@ -349,6 +394,29 @@
                 
                 statusEl.textContent = 'Camera active - Ready to stream! 📹';
                 statusEl.className = 'status streaming';
+
+                // Create WebRTC connection immediately after camera is ready
+                console.log('Creating peer connection after camera ready');
+                peerConnection = createPeerConnection();
+                
+                if (peerConnection) {
+                    // Add tracks to the connection
+                    localStream.getTracks().forEach(track => {
+                        console.log('Adding track to peer connection:', track.kind);
+                        peerConnection.addTrack(track, localStream);
+                    });
+
+                    // Create and send offer
+                    try {
+                        console.log('Creating offer');
+                        const offer = await peerConnection.createOffer();
+                        await peerConnection.setLocalDescription(offer);
+                        console.log('Sending offer to laptop');
+                        socket.emit('offer', offer);
+                    } catch (err) {
+                        console.error('Error creating/sending offer:', err);
+                    }
+                }
                 
                 // Initialize object detector
                 const detectorInitialized = await initDetector();
