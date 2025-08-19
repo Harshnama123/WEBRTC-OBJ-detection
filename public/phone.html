@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phone Camera</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            background-color: #000;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        #localVideo {
+            width: 100%;
+            max-width: 400px;
+            height: auto;
+            border: 2px solid #4CAF50;
+            border-radius: 10px;
+            background: #333;
+        }
+        
+        .controls {
+            margin: 20px 0;
+            text-align: center;
+        }
+        
+        button {
+            padding: 15px 25px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            margin: 5px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .start-btn {
+            background: #4CAF50;
+            color: white;
+        }
+        
+        .stop-btn {
+            background: #f44336;
+            color: white;
+        }
+        
+        .start-btn:hover { background: #45a049; }
+        .stop-btn:hover { background: #da190b; }
+        
+        .status {
+            text-align: center;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            background: #333;
+            width: 90%;
+            max-width: 400px;
+        }
+        
+        .connected { background: #4CAF50; }
+        .disconnected { background: #f44336; }
+        .streaming { background: #2196F3; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>📱 Phone Camera</h2>
+        <p>Stream your camera to laptop</p>
+    </div>
+    
+    <div class="status" id="status">
+        Connecting to server...
+    </div>
+    
+    <video id="localVideo" 
+           autoplay 
+           muted 
+           playsinline
+           style="width: 100%; max-width: 640px; min-height: 240px; 
+                  background: #000; display: block; margin: 0 auto; 
+                  border: 2px solid #4CAF50; border-radius: 10px;">
+        Your browser doesn't support video.
+    </video>
+    
+    <div class="controls">
+        <button class="start-btn" id="startBtn">Start Camera</button>
+        <button class="stop-btn" id="stopBtn" style="display: none;">Stop Camera</button>
+    </div>
+    
+    <div style="text-align: center; margin-top: 20px; font-size: 14px; color: #888;">
+        <p>Make sure to allow camera permissions when prompted</p>
+    </div>
+
+    <canvas id="captureCanvas" width="320" height="240" style="display:none;"></canvas>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="wasm-inference.js"></script>
+    <script>
+        const socket = io();
+        const statusEl = document.getElementById('status');
+        const localVideo = document.getElementById('localVideo');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        
+        let localStream = null;
+        let detector = null;
+        let frameProcessor = null;
+        const captureCanvas = document.getElementById('captureCanvas');
+        const captureContext = captureCanvas.getContext('2d');
+        
+        // Initialize object detector
+        async function initDetector() {
+            try {
+                if (detector) {
+                    console.log('Detector already exists, skipping initialization');
+                    return true;
+                }
+                
+                console.log('Starting detector initialization...');
+                detector = new ObjectDetector();
+                console.log('Detector created, loading model...');
+                await detector.loadModel();
+                console.log('Object detector fully initialized');
+                return true;
+            } catch (error) {
+                console.error('Failed to initialize detector:', error);
+                detector = null;
+                return false;
+            }
+        }
+
+        // Frame capture function
+        async function captureFrame() {
+            if (!localStream) {
+                console.log('No local stream available');
+                return;
+            }
+            
+            if (!detector) {
+                console.log('Detector not initialized, attempting to initialize...');
+                const initialized = await initDetector();
+                if (!initialized) {
+                    console.log('Failed to initialize detector, skipping frame');
+                    return;
+                }
+            }
+            
+            try {
+                // Draw current frame to canvas
+                captureContext.drawImage(localVideo, 0, 0, 320, 240);
+                
+                // Get image data
+                const imageData = captureContext.getImageData(0, 0, 320, 240);
+                
+                // Process frame
+                const results = await detector.detectObjects(imageData);
+                if (results) {
+                    socket.emit('detection-results', results);
+                    console.log('Detection results:', results);
+                }
+            } catch (error) {
+                console.error('Error capturing frame:', error);
+                if (error.message.includes('Model not loaded')) {
+                    // Reset detector if model loading failed
+                    detector = null;
+                }
+            }
+        }
+        
+        // Socket connection status
+        let peerConnection = null;
+
+        socket.on('connect', () => {
+            console.log('Connected to server');
+            statusEl.textContent = 'Connected to server ✅';
+            statusEl.className = 'status connected';
+            
+            // Tell server this is a phone
+            socket.emit('device-type', 'phone');
+        });
+
+        function cleanupPeerConnection() {
+            if (peerConnection) {
+                // Remove all event listeners
+                peerConnection.onicecandidate = null;
+                peerConnection.oniceconnectionstatechange = null;
+                
+                // Close the connection
+                peerConnection.close();
+                peerConnection = null;
+            }
+        }
+
+        function createPeerConnection() {
+            // Clean up any existing connection first
+            cleanupPeerConnection();
+
+            try {
+                peerConnection = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' }
+                    ]
+                });
+
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        console.log("Sending ICE candidate from phone");
+                        socket.emit('ice-candidate', event.candidate);
+                    }
+                };
+
+                peerConnection.oniceconnectionstatechange = () => {
+                    console.log("ICE Connection State:", peerConnection.iceConnectionState);
+                    if (peerConnection.iceConnectionState === 'disconnected' || 
+                        peerConnection.iceConnectionState === 'failed' ||
+                        peerConnection.iceConnectionState === 'closed') {
+                        cleanupPeerConnection();
+                    }
+                };
+
+                return peerConnection;
+            } catch (error) {
+                console.error("Error creating peer connection:", error);
+                return null;
+            }
+        }
+        
+        socket.on('disconnect', () => {
+            statusEl.textContent = 'Disconnected from server';
+            statusEl.className = 'status disconnected';
+        });
+        
+        // Camera controls
+        async function requestCamera() {
+            try {
+                console.log('📱 Requesting camera access...');
+                
+                // First check if getUserMedia is supported
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error('Your browser does not support camera access. Please use a modern browser like Chrome or Firefox.');
+                }
+                
+                // First, get permission without constraints
+                console.log('📱 Requesting initial camera permission...');
+                await navigator.mediaDevices.getUserMedia({ video: true });
+                
+                // Now enumerate devices after permission
+                console.log('📱 Checking available cameras...');
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                console.log('📱 Available cameras:', videoDevices);
+                
+                if (videoDevices.length === 0) {
+                    throw new Error('No cameras found on device!');
+                }
+
+                // Set mandatory constraints for proper resolution
+                const constraints = {
+                    audio: false,
+                    video: {
+                        width: { min: 640, ideal: 1280, max: 1920 },
+                        height: { min: 480, ideal: 720, max: 1080 },
+                        frameRate: { min: 15, ideal: 30 },
+                        facingMode: { ideal: 'environment' },
+                        aspectRatio: { ideal: 1.777777778 },
+                        resizeMode: 'crop-and-scale'
+                    }
+                };
+                
+                // Try to get camera access with constraints
+                console.log('📱 Using camera constraints:', constraints);
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                
+                // Verify we got video tracks
+                if (stream.getVideoTracks().length > 0) {
+                    const track = stream.getVideoTracks()[0];
+                    const settings = track.getSettings();
+                    
+                    console.log('📱 Got camera stream:', {
+                        width: settings.width,
+                        height: settings.height,
+                        frameRate: settings.frameRate,
+                        facingMode: settings.facingMode
+                    });
+                    
+                    // Verify dimensions
+                    if (!settings.width || !settings.height || 
+                        settings.width < 640 || settings.height < 480) {
+                        console.warn('⚠️ Camera dimensions too small, will need to scale up');
+                    }
+                    
+                    // Create a test video element to verify stream
+                    const testVideo = document.createElement('video');
+                    testVideo.srcObject = stream;
+                    testVideo.muted = true;
+                    testVideo.playsInline = true;
+                    
+                    await new Promise((resolve, reject) => {
+                        testVideo.onloadedmetadata = () => {
+                            console.log('📱 Test video dimensions:', {
+                                width: testVideo.videoWidth,
+                                height: testVideo.videoHeight
+                            });
+                            
+                            if (testVideo.videoWidth >= 640 && testVideo.videoHeight >= 480) {
+                                resolve();
+                            } else {
+                                console.warn('⚠️ Test video dimensions below target:', {
+                                    width: testVideo.videoWidth,
+                                    height: testVideo.videoHeight
+                                });
+                                resolve(); // Continue anyway
+                            }
+                        };
+                        testVideo.onerror = () => reject(new Error('Test video failed'));
+                        setTimeout(() => reject(new Error('Test video timeout')), 5000);
+                    });
+                    
+                    return stream;
+                } else {
+                    throw new Error('No video track in media stream');
+                }
+            } catch (err) {
+                console.error('Camera access error:', err);
+                throw err;
+            }
+        }
+
+        startBtn.addEventListener('click', async () => {
+            try {
+                statusEl.textContent = 'Requesting camera access...';
+                localStream = await requestCamera();
+                
+                console.log("Camera access granted");
+                localVideo.srcObject = localStream;
+                
+                startBtn.style.display = 'none';
+                stopBtn.style.display = 'inline-block';
+                
+                statusEl.textContent = 'Camera active - Ready to stream! 📹';
+                statusEl.className = 'status streaming';
+                
+                // Initialize object detector
+                const detectorInitialized = await initDetector();
+                if (detectorInitialized) {
+                    // Start frame capture loop (15 FPS)
+                    frameProcessor = setInterval(captureFrame, 67);
+                }
+
+                // Create WebRTC connection when camera is ready
+                peerConnection = createPeerConnection();
+                
+                // Add tracks to the connection
+                localStream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, localStream);
+                });
+
+                // Frame capture is already started with initDetector()
+
+                // Notify server that phone is ready
+                socket.emit('phone-ready');
+
+                // Remove any existing laptop-ready listener
+                socket.off('laptop-ready');
+                
+                // Wait for laptop to be ready
+                socket.on('laptop-ready', async () => {
+                    try {
+                        console.log("Laptop is ready, setting up connection");
+                        
+                        // Create new peer connection
+                        peerConnection = createPeerConnection();
+                        if (!peerConnection) {
+                            throw new Error("Failed to create peer connection");
+                        }
+
+                        // Add video track to peer connection
+                        localStream.getTracks().forEach(track => {
+                            peerConnection.addTrack(track, localStream);
+                        });
+
+                        // Handle ICE candidates
+                        peerConnection.onicecandidate = (event) => {
+                            if (event.candidate) {
+                                console.log("Sending ICE candidate from phone");
+                                socket.emit('ice-candidate', event.candidate);
+                            }
+                        };
+
+                        // Create and send offer
+                        try {
+                            const offer = await peerConnection.createOffer();
+                            await peerConnection.setLocalDescription(offer);
+                            console.log("Created and set local description");
+                            
+                            // Only send offer if we successfully set local description
+                            if (peerConnection.signalingState === "have-local-offer") {
+                                console.log("Sending offer from phone");
+                                socket.emit('offer', offer);
+                            } else {
+                                console.log("Incorrect state after setting local description:", peerConnection.signalingState);
+                                throw new Error("Incorrect signaling state");
+                            }
+                        } catch (e) {
+                            console.error("Error creating/sending offer:", e);
+                            // If there's an error, retry after a short delay
+                            setTimeout(() => socket.emit('phone-ready'), 1000);
+                        }
+
+                        // Handle answer from laptop
+                        socket.on('answer', async (answer) => {
+                            try {
+                                console.log("Received answer, state:", peerConnection?.signalingState);
+                                if (!peerConnection) {
+                                    console.log("No peer connection available for answer");
+                                    return;
+                                }
+                                
+                                if (peerConnection.signalingState === "have-local-offer") {
+                                    await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+                                    console.log("Set remote description from answer");
+                                } else {
+                                    console.log("Incorrect signaling state for answer:", peerConnection.signalingState);
+                                }
+                            } catch (e) {
+                                console.error("Error handling answer:", e);
+                                // If there's an error, retry the connection
+                                socket.emit('phone-ready');
+                            }
+                        });
+
+                        // Handle ICE candidates from laptop
+                        socket.on('ice-candidate', async (candidate) => {
+                            try {
+                                if (peerConnection.remoteDescription) {
+                                    await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                                    console.log("Added ICE candidate from laptop");
+                                }
+                            } catch (e) {
+                                console.error("Error adding ICE candidate:", e);
+                            }
+                        });
+                    } catch (e) {
+                        console.error("Error in WebRTC setup:", e);
+                    }
+                });
+                
+                // Notify server that phone is ready
+                socket.emit('phone-ready');
+                
+            } catch (error) {
+                console.error('Error accessing camera:', error);
+                let errorMessage = 'Error: Could not access camera';
+                let helpMessage = '';
+                
+                if (error.name === 'NotAllowedError') {
+                    errorMessage = 'Camera access denied';
+                    helpMessage = 'Please follow these steps:\n1. Tap the lock icon in your address bar\n2. Select "Site settings"\n3. Allow camera access\n4. Refresh the page and try again';
+                } else if (error.name === 'NotFoundError') {
+                    errorMessage = 'No camera found';
+                    helpMessage = 'Please make sure:\n1. Your device has a camera\n2. No other app is using the camera\n3. Try closing other browser tabs';
+                } else if (error.name === 'NotReadableError') {
+                    errorMessage = 'Camera is busy';
+                    helpMessage = 'Please try:\n1. Closing other apps using the camera\n2. Restarting your browser\n3. Restarting your device if problem persists';
+                } else if (error.name === 'SecurityError') {
+                    errorMessage = 'Camera access blocked by browser';
+                    helpMessage = 'Please:\n1. Check if your browser blocks camera access by default\n2. Try using Chrome or Firefox\n3. Check your browser\'s security settings';
+                } else {
+                    // Log the specific error for debugging
+                    console.log('Specific camera error:', error.name, error.message);
+                    helpMessage = 'Please try:\n1. Refreshing the page\n2. Using a different browser\n3. Checking camera permissions';
+                }
+                
+                // Update status with error
+                statusEl.className = 'status disconnected';
+                statusEl.innerHTML = `
+                    <div style="color: #ff4444; font-weight: bold; margin-bottom: 10px;">
+                        ${errorMessage}
+                    </div>
+                    <div style="font-size: 14px; color: #ffffff; white-space: pre-line; text-align: left; margin-top: 10px;">
+                        ${helpMessage}
+                    </div>
+                    <div style="margin-top: 15px;">
+                        <button onclick="location.reload()" style="padding: 8px 16px; background: #4CAF50; border: none; border-radius: 4px; color: white; cursor: pointer;">
+                            Try Again
+                        </button>
+                    </div>
+                    <div style="font-size: 12px; color: #888; margin-top: 10px;">
+                        Problem: ${error.name}<br>
+                        Details: ${error.message}
+                    </div>
+                `;
+            }
+        });
+        
+        stopBtn.addEventListener('click', () => {
+            // Stop all media tracks
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localVideo.srcObject = null;
+                localStream = null;
+            }
+            
+            // Stop frame processor
+            if (frameProcessor) {
+                clearInterval(frameProcessor);
+                frameProcessor = null;
+            }
+            
+            // Clean up detector
+            if (detector) {
+                detector = null;
+            }
+            
+            // Clean up WebRTC
+            cleanupPeerConnection();
+            
+            // Remove all socket listeners
+            socket.off('laptop-ready');
+            socket.off('answer');
+            socket.off('ice-candidate');
+            
+            startBtn.style.display = 'inline-block';
+            stopBtn.style.display = 'none';
+            
+            statusEl.textContent = 'Camera stopped';
+            statusEl.className = 'status connected';
+            
+            socket.emit('phone-stopped');
+        });
+        
+        console.log('Phone view initialized');
+    </script>
+</body>
+</html>

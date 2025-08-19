@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Object Detection Demo - Laptop View</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #1a1a1a;
+      color: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container { max-width: 1200px; width: 100%; }
+    .header { text-align: center; margin-bottom: 30px; }
+    .qr-section {
+      text-align: center;
+      margin-bottom: 30px;
+      padding: 20px;
+      border: 2px dashed #4CAF50;
+      border-radius: 10px;
+    }
+    .phone-url {
+      font-size: 18px;
+      color: #4CAF50;
+      margin: 10px 0;
+    }
+    .video-container {
+      position: relative;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      margin: 20px auto;
+      width: 100%;
+      max-width: 800px;
+      min-height: 400px;
+      background: #000;
+      border-radius: 10px;
+      overflow: hidden;
+      aspect-ratio: 16/9;
+    }
+    
+    #playOverlay button:hover {
+      background: #45a049 !important;
+      transform: scale(1.05);
+      transition: all 0.2s ease;
+    }
+    #remoteVideo {
+      width: 100%;
+      max-width: 640px;
+      height: auto;
+      min-width: 320px;
+      min-height: 240px;
+      background: #1a1a1a;
+      border: 2px solid #00ff00;
+      display: block;
+      object-fit: contain;
+      margin: 0 auto;
+    }
+    #detectionCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    .detection-stats {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.8);
+      padding: 15px;
+      border-radius: 8px;
+      color: white;
+      font-family: monospace;
+      font-size: 14px;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .status { text-align: center; padding: 10px; margin: 10px 0; border-radius: 5px; background: #333; }
+    .connected { background: #4CAF50; }
+    .disconnected { background: #f44336; }
+    .waiting { background: #ff9800; }
+    @keyframes pulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+      100% { transform: scale(1); }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🎯 Real-time Object Detection</h1>
+      <p>Scan QR code with your phone to start streaming</p>
+    </div>
+    
+    <div class="qr-section">
+      <h3>📱 Connect Your Phone</h3>
+      <div style="background: #333; padding: 20px; border-radius: 10px; margin: 20px 0;">
+        <p style="font-size: 18px; margin-bottom: 10px;">On your phone, visit:</p>
+        <div class="phone-url" style="font-size: 24px; font-weight: bold;">
+          <span id="phoneUrl">Loading...</span>
+        </div>
+        <div style="margin-top: 15px;">
+          <button onclick="copyUrl()" style="padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">
+            📋 Copy URL
+          </button>
+        </div>
+      </div>
+      <p><small>Make sure your phone and laptop are on the same WiFi network</small></p>
+    </div>
+    
+    <div class="status waiting" id="status">
+      Waiting for phone connection...
+    </div>
+    
+    <div class="video-container">
+      <div id="playOverlay" style="display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; 
+           background: rgba(0,0,0,0.9); cursor: pointer; z-index: 10;
+           display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;">
+        <div style="font-size: 20px; color: white; text-align: center;">
+          Camera stream ready!<br>
+          <small style="opacity: 0.8;">Click the button below to start</small>
+        </div>
+        <button style="padding: 20px 40px; font-size: 24px; background: #4CAF50; color: white; 
+                border: 3px solid white; border-radius: 12px; cursor: pointer; 
+                box-shadow: 0 4px 15px rgba(0,0,0,0.3); transition: all 0.2s ease;
+                animation: pulse 2s infinite;"
+                onclick="
+                  event.stopPropagation();
+                  console.log('🎯 Play button clicked');
+                  const video = document.getElementById('remoteVideo');
+                  if (video && video.srcObject && video.srcObject.active) {
+                    video.play().catch(err => {
+                      console.error('Play failed:', err);
+                      if (err.name === 'NotAllowedError') {
+                        console.log('Playback requires user interaction');
+                      }
+                    });
+                  } else {
+                    console.warn('Stream not ready yet');
+                  }">
+          ▶️ Start Video Stream
+        </button>
+        <div style="margin-top: 10px; font-size: 14px;">
+          Video stream is <span id="streamStatus" style="font-weight: bold; color: #ff9800;">connecting...</span>
+          <div id="streamDetails" style="margin-top: 5px; font-size: 12px; color: #888;"></div>
+        </div>
+      </div>
+      <video id="remoteVideo" 
+             playsinline 
+             muted
+             autoplay
+             width="640"
+             height="480"
+             style="width: 100%; max-width: 800px; min-height: 300px; 
+                    border: 2px solid #00ff00; background: #000; 
+                    display: block; margin: 0 auto; object-fit: contain;
+                    transform: translateZ(0); /* Force hardware acceleration */
+                    will-change: transform; /* Optimize performance */
+                    backface-visibility: hidden;
+                    -webkit-backface-visibility: hidden;
+                    perspective: 1000px;
+                    -webkit-perspective: 1000px;"
+             onresize="console.log('Video size changed:', this.videoWidth, 'x', this.videoHeight)"
+             onloadeddata="console.log('Video data loaded:', this.videoWidth, 'x', this.videoHeight)">
+        Your browser doesn't support video playback.
+      </video>
+      <canvas id="detectionCanvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;"></canvas>
+      <div class="detection-stats" id="stats"></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const statusEl = document.getElementById('status');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const phoneUrlEl = document.getElementById('phoneUrl');
+    const canvas = document.getElementById('detectionCanvas');
+    const ctx = canvas.getContext('2d');
+    const statsEl = document.getElementById('stats');
+
+    async function setupVideoStream(event) {
+        try {
+            console.log('📹 Track received:', event.track.kind);
+            
+            const remoteVideo = document.getElementById('remoteVideo');
+            const playOverlay = document.getElementById('playOverlay');
+            const streamStatus = document.getElementById('streamStatus');
+            
+            if (event.streams && event.streams[0]) {
+                const stream = event.streams[0];
+                const videoTrack = event.track;
+                
+                console.log('Initial track state:', {
+                    enabled: videoTrack.enabled,
+                    state: videoTrack.readyState,
+                    settings: videoTrack.getSettings()
+                });
+                
+                // Set up track event handlers
+                videoTrack.onmute = () => {
+                    console.log('🔇 Track muted');
+                    streamStatus.textContent = 'muted';
+                    streamStatus.style.color = '#ff9800';
+                };
+                
+                videoTrack.onunmute = () => {
+                    console.log('🔊 Track unmuted');
+                    streamStatus.textContent = 'active';
+                    streamStatus.style.color = '#4CAF50';
+                };
+                
+                videoTrack.onended = () => {
+                    console.log('⏹️ Track ended');
+                    streamStatus.textContent = 'ended';
+                    streamStatus.style.color = '#ff4444';
+                };
+                
+                // Wait for track to be ready
+                await new Promise((resolve, reject) => {
+                    if (videoTrack.readyState === 'live') {
+                        resolve();
+                    } else {
+                        let timeout;
+                        const cleanup = () => {
+                            videoTrack.onmute = null;
+                            videoTrack.onunmute = null;
+                            clearTimeout(timeout);
+                        };
+                        
+                        videoTrack.onmute = () => { cleanup(); resolve(); };
+                        videoTrack.onunmute = () => { cleanup(); resolve(); };
+                        
+                        // Timeout after 5s
+                        timeout = setTimeout(() => {
+                            cleanup();
+                            reject(new Error('Track ready timeout'));
+                        }, 5000);
+                    }
+                }).catch(err => {
+                    console.warn('Warning: Track ready timeout, continuing anyway');
+                });
+                
+                // Get and log track settings
+                const settings = videoTrack.getSettings();
+                console.log('📹 Video track settings:', settings);
+                
+                // Force track to provide dimensions if needed
+                if (!settings.width || !settings.height) {
+                    console.warn('⚠️ No dimensions from track, applying constraints...');
+                    await videoTrack.applyConstraints({
+                        width: { min: 640, ideal: 1280 },
+                        height: { min: 480, ideal: 720 }
+                    }).catch(err => {
+                        console.warn('Could not apply constraints:', err);
+                    });
+                }
+                
+                // Configure video element
+                remoteVideo.playsInline = true;
+                remoteVideo.autoplay = true;
+                remoteVideo.muted = true;
+                
+                // Set the stream
+                remoteVideo.srcObject = stream;
+                console.log('✅ Stream assigned to video element');
+                
+                // Show play overlay
+                playOverlay.style.display = 'flex';
+                
+                // Add click handlers for video play with logging
+                const overlayButton = playOverlay.querySelector('button');
+                let playbackMonitor = null;
+                
+                // Function to handle video playback
+                const startPlayback = async () => {
+                    console.log('👆 Start playback requested');
+                    
+                    // Double check stream state
+                    if (!checkVideoState()) {
+                        console.log('⚠️ Stream not ready yet, waiting 500ms...');
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                        if (!checkVideoState()) {
+                            console.error('❌ Stream still not ready after waiting');
+                            return;
+                        }
+                    }
+
+                    try {
+                        console.log('▶️ Attempting video playback...');
+                        await remoteVideo.play();
+                        
+                        console.log('✅ Playback started! State:', {
+                            playing: !remoteVideo.paused,
+                            time: remoteVideo.currentTime,
+                            dimensions: `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`
+                        });
+                        
+                        playOverlay.style.display = 'none';
+                        
+                        // Monitor playback
+                        const monitor = setInterval(() => {
+                            const state = checkVideoState();
+                            if (!state || remoteVideo.paused) {
+                                console.log('⚠️ Playback interrupted, attempting resume...');
+                                remoteVideo.play().catch(console.error);
+                            }
+                        }, 1000);
+                        
+                        // Cleanup monitor on end
+                        remoteVideo.onended = () => clearInterval(monitor);
+                        
+                    } catch (err) {
+                        console.error('❌ Playback failed:', err);
+                        // Show play overlay again
+                        playOverlay.style.display = 'flex';
+                        
+                        if (err.name === 'NotAllowedError') {
+                            console.log('🤚 Playback requires user interaction');
+                        } else {
+                            // Try to recover automatically
+                            setTimeout(startPlayback, 1000);
+                        }
+                    }
+                };
+                
+                overlayButton.onclick = (e) => {
+                    e.stopPropagation();
+                    console.log('🎯 Play button clicked');
+                    startPlayback();
+                };
+                
+                playOverlay.onclick = () => {
+                    console.log('🎯 Play overlay clicked');
+                    startPlayback();
+                };
+                
+                remoteVideo.onclick = () => {
+                    console.log('🎯 Video element clicked');
+                    startPlayback();
+                };
+                
+                // Handle metadata loading
+                // Handle video events
+                const events = ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'pause', 'ended'];
+                events.forEach(event => {
+                    remoteVideo.addEventListener(event, () => {
+                        console.log(`🎥 Video event: ${event}`, {
+                            dimensions: `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`,
+                            readyState: remoteVideo.readyState,
+                            paused: remoteVideo.paused,
+                            time: remoteVideo.currentTime
+                        });
+                    });
+                });
+                
+                remoteVideo.addEventListener('loadedmetadata', function metadataHandler() {
+                    console.log('🎯 Metadata loaded! Dimensions:', {
+                        videoWidth: remoteVideo.videoWidth,
+                        videoHeight: remoteVideo.videoHeight,
+                        naturalWidth: remoteVideo.naturalWidth,
+                        naturalHeight: remoteVideo.naturalHeight
+                    });
+                    
+                    if (remoteVideo.videoWidth > 0 && remoteVideo.videoHeight > 0) {
+                        console.log('✅ Video has valid dimensions!');
+                        remoteVideo.removeEventListener('loadedmetadata', metadataHandler);
+                        
+                        // Update canvas size for detection overlay
+                        const canvas = document.getElementById('detectionCanvas');
+                        canvas.width = remoteVideo.videoWidth;
+                        canvas.height = remoteVideo.videoHeight;
+                        
+                        // Show play overlay once we're sure we have valid video
+                        playOverlay.style.display = 'flex';
+                        
+                        // Start a monitoring interval
+                        setInterval(() => {
+                            const state = checkVideoState();
+                            if (state && !remoteVideo.paused) {
+                                playOverlay.style.display = 'none';
+                            }
+                        }, 1000);
+                    }
+                });
+                
+                // Update video container visibility
+                const videoContainer = document.querySelector('.video-container');
+                videoContainer.style.display = 'flex';
+                videoContainer.style.visibility = 'visible';
+                remoteVideo.style.display = 'block';
+            }
+        } catch (error) {
+            console.error('❌ Error setting up video:', error);
+            statusEl.textContent = 'Video setup failed. Please refresh the page.';
+            statusEl.className = 'status disconnected';
+        }
+    }
+        
+
+
+    let peerConnection = null;
+    let isConnecting = false;
+
+    function cleanupPeerConnection() {
+      if (peerConnection) {
+        try {
+          // Remove all tracks
+          const senders = peerConnection.getSenders();
+          senders.forEach(sender => {
+            try {
+              peerConnection.removeTrack(sender);
+            } catch (e) {
+              console.warn('Error removing track:', e);
+            }
+          });
+          
+          // Remove all event listeners
+          peerConnection.ontrack = null;
+          peerConnection.onicecandidate = null;
+          peerConnection.oniceconnectionstatechange = null;
+          
+          // Close and remove all media streams
+          if (remoteVideo.srcObject) {
+            remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+            remoteVideo.srcObject = null;
+          }
+          
+          // Close the connection
+          peerConnection.close();
+        } catch (e) {
+          console.warn('Error during cleanup:', e);
+        }
+        peerConnection = null;
+      }
+      isConnecting = false;
+    }
+
+    function createPeerConnection() {
+      try {
+        // Cleanup any existing connection
+        cleanupPeerConnection();
+        
+        console.log('Creating new peer connection...');
+        isConnecting = true;
+
+        peerConnection = new RTCPeerConnection({
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' }
+          ]
+        });
+
+        // Set up event handlers
+        peerConnection.ontrack = setupVideoStream;
+
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate) {
+            console.log('Sending ICE candidate');
+            socket.emit('ice-candidate', event.candidate);
+          }
+        };
+
+        peerConnection.oniceconnectionstatechange = () => {
+          const state = peerConnection.iceConnectionState;
+          console.log("ICE Connection State:", state);
+          
+          if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+            console.log('Connection lost, cleaning up...');
+            cleanupPeerConnection();
+          }
+        };
+
+        console.log('Peer connection created successfully');
+        return peerConnection;
+      } catch (error) {
+        console.error('Error creating peer connection:', error);
+        cleanupPeerConnection();
+        return null;
+      }
+    }
+
+    function initUrl() {
+      phoneUrlEl.textContent = `${window.location.origin}/phone`;
+    }
+    function copyUrl() {
+      navigator.clipboard.writeText(phoneUrlEl.textContent).then(() => {
+        alert('URL copied! Paste it in your phone browser.');
+      });
+    }
+
+    // Helper function to check video state
+    function checkVideoState() {
+        const remoteVideo = document.getElementById('remoteVideo');
+        const streamStatus = document.getElementById('streamStatus');
+        const streamDetails = document.getElementById('streamDetails');
+        
+        if (!remoteVideo.srcObject) {
+            console.log('❌ No stream assigned to video');
+            streamStatus.textContent = 'no stream';
+            streamStatus.style.color = '#ff4444';
+            streamDetails.textContent = 'Waiting for stream connection...';
+            return false;
+        }
+
+        const videoTrack = remoteVideo.srcObject.getVideoTracks()[0];
+        if (!videoTrack) {
+            console.log('❌ No video track in stream');
+            streamStatus.textContent = 'no video track';
+            streamStatus.style.color = '#ff4444';
+            streamDetails.textContent = 'No video track available';
+            return false;
+        }
+
+        const state = {
+            track: {
+                enabled: videoTrack.enabled,
+                state: videoTrack.readyState,
+                settings: videoTrack.getSettings()
+            },
+            video: {
+                paused: remoteVideo.paused,
+                ready: remoteVideo.readyState,
+                size: `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`,
+                time: remoteVideo.currentTime
+            }
+        };
+
+        console.log('📊 Video state:', state);
+        
+        if (!videoTrack.enabled) {
+            streamStatus.textContent = 'disabled';
+            streamStatus.style.color = '#ff4444';
+            streamDetails.textContent = 'Video track is disabled';
+            return false;
+        }
+        
+        if (videoTrack.readyState !== 'live') {
+            streamStatus.textContent = videoTrack.readyState;
+            streamStatus.style.color = '#ff9800';
+            streamDetails.textContent = 'Video track is not live';
+            return false;
+        }
+        
+        if (remoteVideo.videoWidth === 0 || remoteVideo.videoHeight === 0) {
+            streamStatus.textContent = 'no dimensions';
+            streamStatus.style.color = '#ff9800';
+            streamDetails.textContent = 'Waiting for video dimensions...';
+            return false;
+        }
+        
+        const settings = videoTrack.getSettings();
+        streamStatus.textContent = 'ready';
+        streamStatus.style.color = '#4CAF50';
+        streamDetails.textContent = `${settings.width}x${settings.height} @ ${settings.frameRate}fps`;
+        return true;
+    }
+
+    // Socket event handlers
+    socket.on('phone-connected', async () => {
+      console.log('Phone connected event received');
+      try {
+        // Update UI
+        statusEl.textContent = 'Phone connected! 🎉';
+        statusEl.className = 'status connected';
+        document.querySelector('.qr-section').style.display = 'none';
+        document.querySelector('.header p').style.display = 'none';
+        document.querySelector('.video-container').style.display = 'flex';
+
+        // Create new peer connection
+        const pc = createPeerConnection();
+        if (!pc) {
+          throw new Error("Failed to create peer connection");
+        }
+
+        // Signal readiness to the server
+        console.log('Sending laptop-ready signal');
+        socket.emit('laptop-ready');
+      } catch (e) {
+        console.error("Error in phone-connected handler:", e);
+        statusEl.textContent = 'Connection failed. Please refresh and try again.';
+        statusEl.className = 'status disconnected';
+        cleanupPeerConnection();
+      }
+    });
+
+    socket.on('offer', async (offer) => {
+      console.log("Received offer from phone");
+      try {
+        // Clean up any existing connection first
+        cleanupPeerConnection();
+        
+        // Create new peer connection
+        console.log("Creating new peer connection for offer");
+        const pc = createPeerConnection();
+        if (!pc) {
+          throw new Error("Failed to create peer connection for offer");
+        }
+        
+        // Set remote description
+        console.log("Setting remote description");
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        
+        // Create and set local description
+        console.log("Creating answer");
+        const answer = await pc.createAnswer();
+        console.log("Setting local description");
+        await pc.setLocalDescription(answer);
+        
+        // Send answer
+        console.log("Sending answer to phone");
+        socket.emit('answer', answer);
+        
+        // Update UI
+        statusEl.textContent = 'Connected to phone! 🎉';
+        statusEl.className = 'status connected';
+      } catch (e) {
+        console.error("Error handling offer:", e);
+        statusEl.textContent = 'Connection failed. Please try again.';
+        statusEl.className = 'status disconnected';
+        cleanupPeerConnection();
+      }
+    });
+
+    socket.on('ice-candidate', async (candidate) => {
+      try {
+        if (!peerConnection) {
+          console.log("Waiting for peer connection...");
+          return;
+        }
+        if (peerConnection.remoteDescription) {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+          console.log("Added ICE candidate");
+        } else {
+          console.log("Waiting for remote description before adding ICE candidate");
+        }
+      } catch (e) {
+        console.error("Error adding ICE candidate:", e);
+      }
+    });
+
+    socket.on('phone-disconnected', () => {
+      console.log('Phone disconnected, cleaning up...');
+      
+      // Clean up WebRTC
+      cleanupPeerConnection();
+      
+      // Clean up video element
+      if (remoteVideo.srcObject) {
+        remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+        remoteVideo.srcObject = null;
+      }
+      remoteVideo.style.display = 'none';
+      
+      // Update UI
+      statusEl.textContent = 'Phone disconnected';
+      statusEl.className = 'status disconnected';
+      document.querySelector('.qr-section').style.display = 'block';
+      document.querySelector('.header p').style.display = 'block';
+      document.querySelector('.video-container').style.display = 'none';
+      
+      // Reset state
+      isConnecting = false;
+      
+      console.log('Cleanup complete, ready for new connection');
+    });
+
+    socket.on('detection-results', (results) => {
+      if (!canvas.width || !canvas.height) {
+        canvas.width = remoteVideo.videoWidth;
+        canvas.height = remoteVideo.videoHeight;
+      }
+      
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (results.detections) {
+        results.detections.forEach(detection => {
+          const x = detection.xmin * canvas.width;
+          const y = detection.ymin * canvas.height;
+          const width = (detection.xmax - detection.xmin) * canvas.width;
+          const height = (detection.ymax - detection.ymin) * canvas.height;
+          
+          ctx.strokeStyle = '#00ff00';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(x, y, width, height);
+          
+          const label = `${detection.label} (${Math.round(detection.score * 100)}%)`;
+          ctx.font = '16px Arial';
+          ctx.fillStyle = 'black';
+          ctx.fillRect(x, y - 20, ctx.measureText(label).width + 10, 20);
+          ctx.fillStyle = '#00ff00';
+          ctx.fillText(label, x + 5, y - 5);
+        });
+      }
+      
+      statsEl.textContent = `Detections: ${results.detections.length}\nInference time: ${results.inference_time}ms`;
+    });
+
+    initUrl();
+    console.log('Laptop view initialized');
+  </script>
+</body>
+</html>
