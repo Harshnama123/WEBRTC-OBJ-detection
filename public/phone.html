@@ -79,9 +79,26 @@
         <p>Stream your camera to laptop</p>
     </div>
     
+    <div id="security-warning" style="display: none; background: #ff9800; color: white; padding: 15px; margin: 10px; border-radius: 8px; text-align: left;">
+        <h3 style="margin: 0 0 10px 0;">⚠️ Security Certificate Warning</h3>
+        <p style="margin: 0 0 10px 0;">This is a development server using a self-signed certificate. To enable camera access:</p>
+        <ol style="margin: 0; padding-left: 20px;">
+            <li>Click "Advanced" on the security warning</li>
+            <li>Click "Proceed to site (unsafe)"</li>
+            <li>Allow camera access when prompted</li>
+        </ol>
+    </div>
+
     <div class="status" id="status">
         Connecting to server...
     </div>
+
+    <script>
+        // Show security warning if not in secure context
+        if (!window.isSecureContext) {
+            document.getElementById('security-warning').style.display = 'block';
+        }
+    </script>
     
     <video id="localVideo" 
            autoplay 
@@ -192,19 +209,41 @@
         });
 
         // Add specific handlers for laptop connection
-        socket.on('laptop-ready', () => {
+        socket.on('laptop-ready', async () => {
             console.log('Laptop is ready for connection');
-            if (localStream) {
+            if (!localStream) {
+                console.log('No local stream available yet');
+                return;
+            }
+            
+            try {
                 console.log('We have local stream, creating peer connection');
                 const pc = createPeerConnection();
-                if (pc) {
-                    localStream.getTracks().forEach(track => {
-                        console.log('Adding track to peer connection:', track.kind);
-                        pc.addTrack(track, localStream);
-                    });
+                if (!pc) {
+                    throw new Error('Failed to create peer connection');
                 }
-            } else {
-                console.log('No local stream available yet');
+
+                // Add tracks to the connection
+                localStream.getTracks().forEach(track => {
+                    console.log('Adding track to peer connection:', track.kind);
+                    pc.addTrack(track, localStream);
+                });
+
+                // Create and send offer
+                console.log('Creating offer');
+                const offer = await pc.createOffer({
+                    offerToReceiveVideo: false,
+                    offerToReceiveAudio: false
+                });
+                
+                await pc.setLocalDescription(offer);
+                console.log('Local description set, sending offer');
+                socket.emit('offer', offer);
+            } catch (error) {
+                console.error('Error in laptop-ready handler:', error);
+                cleanupPeerConnection();
+                // Retry after a short delay
+                setTimeout(() => socket.emit('phone-ready'), 2000);
             }
         });
 
@@ -227,8 +266,12 @@
             try {
                 peerConnection = new RTCPeerConnection({
                     iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' }
-                    ]
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun2.l.google.com:19302' },
+                        { urls: 'stun:stun3.l.google.com:19302' }
+                    ],
+                    iceCandidatePoolSize: 10
                 });
 
                 peerConnection.onicecandidate = (event) => {
@@ -280,6 +323,11 @@
             try {
                 console.log('📱 Requesting camera access...');
                 
+                // Check for secure context
+                if (!window.isSecureContext) {
+                    throw new Error('Camera access requires HTTPS. Please accept the security certificate and try again.');
+                }
+                
                 // First check if getUserMedia is supported
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                     throw new Error('Your browser does not support camera access. Please use a modern browser like Chrome or Firefox.');
@@ -324,7 +372,7 @@
                 
                 // Try to get camera access with constraints
                 console.log('📱 Using camera constraints:', constraints);
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                stream = await navigator.mediaDevices.getUserMedia(constraints);
                 
                 // Verify we got video tracks
                 if (stream.getVideoTracks().length > 0) {
@@ -395,29 +443,6 @@
                 statusEl.textContent = 'Camera active - Ready to stream! 📹';
                 statusEl.className = 'status streaming';
 
-                // Create WebRTC connection immediately after camera is ready
-                console.log('Creating peer connection after camera ready');
-                peerConnection = createPeerConnection();
-                
-                if (peerConnection) {
-                    // Add tracks to the connection
-                    localStream.getTracks().forEach(track => {
-                        console.log('Adding track to peer connection:', track.kind);
-                        peerConnection.addTrack(track, localStream);
-                    });
-
-                    // Create and send offer
-                    try {
-                        console.log('Creating offer');
-                        const offer = await peerConnection.createOffer();
-                        await peerConnection.setLocalDescription(offer);
-                        console.log('Sending offer to laptop');
-                        socket.emit('offer', offer);
-                    } catch (err) {
-                        console.error('Error creating/sending offer:', err);
-                    }
-                }
-                
                 // Initialize object detector
                 const detectorInitialized = await initDetector();
                 if (detectorInitialized) {
@@ -426,6 +451,7 @@
                 }
 
                 // Create WebRTC connection when camera is ready
+                console.log('Creating peer connection after camera ready');
                 peerConnection = createPeerConnection();
                 
                 // Add tracks to the connection
@@ -510,10 +536,12 @@
                         // Handle ICE candidates from laptop
                         socket.on('ice-candidate', async (candidate) => {
                             try {
-                                if (peerConnection.remoteDescription) {
-                                    await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-                                    console.log("Added ICE candidate from laptop");
+                                if (!peerConnection) {
+                                    console.log("No peer connection available for ICE candidate");
+                                    return;
                                 }
+                                await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                                console.log("Added ICE candidate from laptop successfully");
                             } catch (e) {
                                 console.error("Error adding ICE candidate:", e);
                             }

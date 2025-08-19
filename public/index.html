@@ -31,17 +31,33 @@
     }
     .video-container {
       position: relative;
-      display: flex;
-      justify-content: center;
-      align-items: center;
       margin: 20px auto;
       width: 100%;
       max-width: 800px;
-      min-height: 400px;
       background: #000;
       border-radius: 10px;
       overflow: hidden;
-      aspect-ratio: 16/9;
+    }
+    
+    .video-display-area {
+      position: relative;
+      width: 100%;
+      height: 0;
+      padding-bottom: 56.25%; /* 16:9 aspect ratio */
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    
+    #remoteVideo {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
     }
     
     #playOverlay button:hover {
@@ -120,69 +136,53 @@
     </div>
     
     <div class="video-container">
-      <div id="playOverlay" style="display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; 
-           background: rgba(0,0,0,0.9); cursor: pointer; z-index: 10;
-           display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px;">
-        <div style="font-size: 20px; color: white; text-align: center;">
-          Camera stream ready!<br>
-          <small style="opacity: 0.8;">Click the button below to start</small>
+        <h3>Phone Camera Feed</h3>
+        <div class="video-display-area">
+            <video id="remoteVideo" 
+                   playsinline 
+                   autoplay
+                   muted
+                   style="width: 100%; max-width: 640px; height: auto; display: none; background: #000;">
+            </video>
+            <canvas id="detectionCanvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;"></canvas>
+            <div id="stream-status" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; background: rgba(0,0,0,0.7); padding: 20px; border-radius: 10px;">
+                <div style="margin-bottom: 20px; color: white;">Connecting to camera stream...</div>
+                <div id="stream-error" style="color: #ff4444; display: none;"></div>
+            </div>
+            <div id="video-stats" style="position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 5px; font-family: monospace; display: none;">
+            </div>
         </div>
-        <button style="padding: 20px 40px; font-size: 24px; background: #4CAF50; color: white; 
-                border: 3px solid white; border-radius: 12px; cursor: pointer; 
-                box-shadow: 0 4px 15px rgba(0,0,0,0.3); transition: all 0.2s ease;
-                animation: pulse 2s infinite;"
-                onclick="
-                  event.stopPropagation();
-                  console.log('🎯 Play button clicked');
-                  const video = document.getElementById('remoteVideo');
-                  if (video && video.srcObject && video.srcObject.active) {
-                    video.play().catch(err => {
-                      console.error('Play failed:', err);
-                      if (err.name === 'NotAllowedError') {
-                        console.log('Playback requires user interaction');
-                      }
-                    });
-                  } else {
-                    console.warn('Stream not ready yet');
-                  }">
-          ▶️ Start Video Stream
-        </button>
-        <div style="margin-top: 10px; font-size: 14px;">
-          Video stream is <span id="streamStatus" style="font-weight: bold; color: #ff9800;">connecting...</span>
-          <div id="streamDetails" style="margin-top: 5px; font-size: 12px; color: #888;"></div>
-        </div>
-      </div>
-      <video id="remoteVideo" 
-             playsinline 
-             muted
-             autoplay
-             width="640"
-             height="480"
-             style="width: 100%; max-width: 640px; height: auto; 
-                    border: 2px solid #00ff00; background: #000; 
-                    display: block; margin: 0 auto; object-fit: contain;
-                    transform: translateZ(0); /* Force hardware acceleration */
-                    will-change: transform; /* Optimize performance */
-                    backface-visibility: hidden;
-                    -webkit-backface-visibility: hidden;"
-             onresize="console.log('Video size changed:', this.videoWidth, 'x', this.videoHeight)"
-             onloadeddata="console.log('Video data loaded:', this.videoWidth, 'x', this.videoHeight)">
-        Your browser doesn't support video playback.
-      </video>
-      <canvas id="detectionCanvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;"></canvas>
-      <div class="detection-stats" id="stats"></div>
     </div>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
+  <script src="video-manager.js"></script>
   <script>
     const socket = io();
+    let ctx;
+    let canvas;
+    let statsEl;
+    let videoManager;
     const statusEl = document.getElementById('status');
     const remoteVideo = document.getElementById('remoteVideo');
     const phoneUrlEl = document.getElementById('phoneUrl');
-    const canvas = document.getElementById('detectionCanvas');
-    const ctx = canvas.getContext('2d');
-    const statsEl = document.getElementById('stats');
+    
+    // Initialize video manager
+    const streamStatus = document.getElementById('stream-status');
+    const videoStats = document.getElementById('video-stats');
+    videoManager = new VideoManager(remoteVideo, streamStatus, videoStats);
+
+    // Initialize canvas and stats elements
+    function initializeCanvas() {
+      canvas = document.getElementById('detectionCanvas');
+      if (canvas) {
+        ctx = canvas.getContext('2d');
+      }
+      statsEl = document.getElementById('stats');
+    }
+
+    // Wait for DOM to load before initializing canvas
+    document.addEventListener('DOMContentLoaded', initializeCanvas);
 
     async function setupVideoStream(event) {
         try {
@@ -448,10 +448,10 @@
           peerConnection.oniceconnectionstatechange = null;
           
           // Store stream state for potential recovery
-          const hadStream = remoteVideo.srcObject !== null;
+          const hadStream = remoteVideo && remoteVideo.srcObject !== null;
           
           // Close and remove all media streams
-          if (remoteVideo.srcObject) {
+          if (remoteVideo && remoteVideo.srcObject) {
             remoteVideo.srcObject.getTracks().forEach(track => track.stop());
             remoteVideo.srcObject = null;
           }
@@ -461,11 +461,15 @@
           
           // Show reconnecting UI if we had a stream
           if (hadStream) {
-            const playOverlay = document.getElementById('playOverlay');
-            const streamStatus = document.getElementById('streamStatus');
-            playOverlay.style.display = 'flex';
-            streamStatus.textContent = 'reconnecting...';
-            streamStatus.style.color = '#ff9800';
+            const streamStatus = document.getElementById('stream-status');
+            if (streamStatus) {
+              streamStatus.style.display = 'block';
+              streamStatus.innerHTML = 'Reconnecting to camera stream...';
+            }
+            
+            if (remoteVideo) {
+              remoteVideo.style.display = 'none';
+            }
             
             // Attempt to reconnect after a short delay
             setTimeout(() => {
@@ -483,11 +487,33 @@
       isConnecting = false;
     }
 
+    function showPlayButton() {
+        const playOverlay = document.getElementById('playOverlay');
+        if (playOverlay) {
+            playOverlay.style.display = 'flex';
+        }
+    }
+
+    function hidePlayButton() {
+        const playOverlay = document.getElementById('playOverlay');
+        if (playOverlay) {
+            playOverlay.style.display = 'none';
+        }
+    }
+
     function createPeerConnection() {
+      // Prevent multiple active connections
+      if (peerConnection && peerConnection.connectionState !== 'closed') {
+          console.log('Closing existing peer connection before creating new one');
+          cleanupPeerConnection();
+      }
+      
+      if (isConnecting) {
+          console.log('Connection already in progress, waiting...');
+          return null;
+      }
+      
       try {
-        // Cleanup any existing connection
-        cleanupPeerConnection();
-        
         console.log('Creating new peer connection...');
         isConnecting = true;
 
@@ -500,7 +526,148 @@
         });
 
         // Set up event handlers
-        peerConnection.ontrack = setupVideoStream;
+        peerConnection.ontrack = async (event) => {
+            console.log('✅ Track received:', event.track.kind, event.track.readyState);
+            
+            const remoteVideo = document.getElementById('remoteVideo');
+            const streamStatus = document.getElementById('stream-status');
+            const videoStats = document.getElementById('video-stats');
+            const streamError = document.getElementById('stream-error');
+            
+            if (!remoteVideo || !streamStatus || !videoStats) {
+                console.error('Required elements not found');
+                return;
+            }
+
+            // Get the stream
+            const [remoteStream] = event.streams;
+            if (!remoteStream) {
+                console.error('No stream in track event');
+                if (streamError) {
+                    streamError.textContent = 'Error: No video stream received';
+                    streamError.style.display = 'block';
+                }
+                return;
+            }
+
+            console.log('✅ Stream received:', remoteStream.id);
+            
+            // Only set stream if it's different
+            if (remoteVideo.srcObject !== remoteStream) {
+                try {
+                    // Update UI
+                    streamStatus.innerHTML = 'Connecting to camera stream...';
+                    remoteVideo.style.display = 'none';
+                    videoStats.style.display = 'none';
+                    
+                    // Configure video element
+                    remoteVideo.playsInline = true;
+                    remoteVideo.muted = true;
+                    remoteVideo.autoplay = false; // We'll manage playback manually
+
+                    // Clear any existing stream
+                    if (remoteVideo.srcObject) {
+                        remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+                    }
+                    
+                    // Set new stream
+                    remoteVideo.srcObject = remoteStream;
+                    console.log('Stream attached to video element');
+
+                    // Start managed playback
+                    videoManager.startPlayback();
+                    
+                    // Wait for metadata and handle playback
+                    remoteVideo.addEventListener('loadedmetadata', async () => {
+                        console.log('✅ Video metadata loaded:', remoteVideo.videoWidth, 'x', remoteVideo.videoHeight);
+                        
+                        // Update canvas for detection
+                        const canvas = document.getElementById('detectionCanvas');
+                        if (canvas) {
+                            canvas.width = remoteVideo.videoWidth;
+                            canvas.height = remoteVideo.videoHeight;
+                            canvas.style.display = 'block';
+                        }
+                        
+                        // Update video stats
+                        videoStats.textContent = `${remoteVideo.videoWidth}x${remoteVideo.videoHeight}`;
+                        
+                        try {
+                            // Make sure we're ready to play
+                            if (remoteVideo.readyState < 2) { // HAVE_CURRENT_DATA
+                                await new Promise((resolve) => {
+                                    remoteVideo.addEventListener('loadeddata', resolve, { once: true });
+                                });
+                            }
+
+                            // Clear any existing play promises
+                            if (window.currentPlayPromise) {
+                                try {
+                                    await window.currentPlayPromise;
+                                } catch (e) {
+                                    console.warn('Previous play promise rejected:', e);
+                                }
+                            }
+
+                            // Start playback
+                            window.currentPlayPromise = remoteVideo.play();
+                            await window.currentPlayPromise;
+                            window.currentPlayPromise = null;
+
+                            console.log('✅ Video playing successfully');
+                            
+                            // Show video, hide status
+                            remoteVideo.style.display = 'block';
+                            streamStatus.style.display = 'none';
+                            videoStats.style.display = 'block';
+                            
+                            // Setup stable playback monitoring
+                            let isRetrying = false;
+                            const playbackMonitor = setInterval(async () => {
+                                if (!isRetrying && (remoteVideo.paused || remoteVideo.ended)) {
+                                    console.log('⚠️ Video playback interrupted, attempting to resume...');
+                                    isRetrying = true;
+                                    try {
+                                        await remoteVideo.play();
+                                        console.log('✅ Playback resumed successfully');
+                                    } catch (e) {
+                                        console.error('Failed to resume playback:', e);
+                                        if (e.name === 'NotAllowedError') {
+                                            addPlayButton(remoteVideo, streamStatus);
+                                        }
+                                    } finally {
+                                        isRetrying = false;
+                                    }
+                                }
+                            }, 1000);
+
+                            // Cleanup monitor when video ends
+                            remoteVideo.addEventListener('ended', () => clearInterval(playbackMonitor));
+                            
+                        } catch (error) {
+                            console.log('❌ Autoplay failed:', error);
+                            addPlayButton(remoteVideo, streamStatus);
+                        }
+                    }, { once: true });
+                    
+                    // Monitor video state
+                    setInterval(() => {
+                        if (remoteVideo.srcObject && remoteVideo.srcObject.active) {
+                            const track = remoteVideo.srcObject.getVideoTracks()[0];
+                            if (track) {
+                                const settings = track.getSettings();
+                                videoStats.textContent = 
+                                    `${settings.width}x${settings.height}@${settings.frameRate}fps`;
+                            }
+                        }
+                    }, 1000);
+                } catch (error) {
+                    console.error('❌ Error setting up video:', error);
+                    streamError.textContent = 'Error: Failed to setup video stream';
+                    streamError.style.display = 'block';
+                }
+            }
+        };
 
         peerConnection.onicecandidate = (event) => {
           if (event.candidate) {
@@ -636,6 +803,16 @@
         document.querySelector('.header p').style.display = 'none';
         document.querySelector('.video-container').style.display = 'flex';
 
+        // Clear any existing video state
+        const remoteVideo = document.getElementById('remoteVideo');
+        if (remoteVideo) {
+            if (remoteVideo.srcObject) {
+                remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+                remoteVideo.srcObject = null;
+            }
+            remoteVideo.load(); // Reset video element state
+        }
+
         // Create new peer connection
         cleanupPeerConnection();
         const pc = createPeerConnection();
@@ -737,17 +914,29 @@
       }
     });
 
+    // Function to handle ICE connection recovery
+    async function handleIceRecovery() {
+        if (!peerConnection) return;
+        
+        console.log('Attempting ICE connection recovery...');
+        try {
+            await peerConnection.restartIce();
+            console.log('ICE restart initiated');
+        } catch (e) {
+            console.error('ICE restart failed:', e);
+            // If restart fails, request complete reconnection
+            setTimeout(() => socket.emit('laptop-ready'), 2000);
+        }
+    }
+
     socket.on('phone-disconnected', () => {
       console.log('Phone disconnected, cleaning up...');
       
       // Clean up WebRTC
       cleanupPeerConnection();
       
-      // Clean up video element
-      if (remoteVideo.srcObject) {
-        remoteVideo.srcObject.getTracks().forEach(track => track.stop());
-        remoteVideo.srcObject = null;
-      }
+      // Clean up video
+      videoManager.stop();
       remoteVideo.style.display = 'none';
       
       // Update UI
@@ -764,33 +953,44 @@
     });
 
     socket.on('detection-results', (results) => {
+      if (!canvas || !ctx) {
+        console.warn('Canvas not initialized yet');
+        return;
+      }
+
       if (!canvas.width || !canvas.height) {
-        canvas.width = remoteVideo.videoWidth;
-        canvas.height = remoteVideo.videoHeight;
+        canvas.width = remoteVideo.videoWidth || 640;
+        canvas.height = remoteVideo.videoHeight || 480;
       }
       
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (results.detections) {
-        results.detections.forEach(detection => {
-          const x = detection.xmin * canvas.width;
-          const y = detection.ymin * canvas.height;
-          const width = (detection.xmax - detection.xmin) * canvas.width;
-          const height = (detection.ymax - detection.ymin) * canvas.height;
-          
-          ctx.strokeStyle = '#00ff00';
-          ctx.lineWidth = 2;
-          ctx.strokeRect(x, y, width, height);
-          
-          const label = `${detection.label} (${Math.round(detection.score * 100)}%)`;
-          ctx.font = '16px Arial';
-          ctx.fillStyle = 'black';
-          ctx.fillRect(x, y - 20, ctx.measureText(label).width + 10, 20);
-          ctx.fillStyle = '#00ff00';
-          ctx.fillText(label, x + 5, y - 5);
-        });
+      try {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (results.detections && Array.isArray(results.detections)) {
+          results.detections.forEach(detection => {
+            const x = detection.xmin * canvas.width;
+            const y = detection.ymin * canvas.height;
+            const width = (detection.xmax - detection.xmin) * canvas.width;
+            const height = (detection.ymax - detection.ymin) * canvas.height;
+            
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x, y, width, height);
+            
+            const label = `${detection.label} (${Math.round(detection.score * 100)}%)`;
+            ctx.font = '16px Arial';
+            ctx.fillStyle = 'black';
+            ctx.fillRect(x, y - 20, ctx.measureText(label).width + 10, 20);
+            ctx.fillStyle = '#00ff00';
+            ctx.fillText(label, x + 5, y - 5);
+          });
+        }
+        
+        if (statsEl) {
+          statsEl.textContent = `Detections: ${results.detections ? results.detections.length : 0}\nInference time: ${results.inference_time}ms`;
+        }
+      } catch (error) {
+        console.error('Error drawing detections:', error);
       }
-      
-      statsEl.textContent = `Detections: ${results.detections.length}\nInference time: ${results.inference_time}ms`;
     });
 
     initUrl();
